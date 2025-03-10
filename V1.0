@@ -1,0 +1,134 @@
+import discord
+from discord.ext import commands
+import sqlite3
+
+# Configuração do bot
+TOKEN = "Meu token né otário nao vou te mostra"  # Substitua pelo token do seu bot
+intents = discord.Intents.default()
+intents.message_content = True
+intents.guilds = True
+intents.members = True
+
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# Conectar ao banco de dados SQLite
+conn = sqlite3.connect("warns.db")
+cursor = conn.cursor()
+
+# Criar tabela se não existir
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS warns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    moderator_id INTEGER NOT NULL,
+    reason TEXT NOT NULL
+)
+""")
+conn.commit()
+
+# Função para adicionar advertência
+@bot.command(name="warn")
+async def warn(ctx, user: discord.Member, *, reason: str):
+    if not ctx.author.guild_permissions.administrator:
+        await ctx.send("Você não tem permissão para usar este comando.")
+        return
+
+    # Adicionar advertência ao banco de dados
+    cursor.execute("""
+    INSERT INTO warns (guild_id, user_id, moderator_id, reason)
+    VALUES (?, ?, ?, ?)
+    """, (ctx.guild.id, user.id, ctx.author.id, reason))
+    conn.commit()
+
+    # Enviar mensagem ao usuário
+    embed = discord.Embed(
+        description=f"Você foi advertido por: {reason}",
+        color=discord.Color.red()
+    )
+    await user.send(embed=embed)
+
+    # Enviar mensagem no canal
+    embed = discord.Embed(
+        description=f"{user.mention} foi advertido por: {reason}",
+        color=discord.Color.blue()
+    )
+    await ctx.send(embed=embed)
+
+# Função para ver advertências
+@bot.command(name="warns")
+async def warns(ctx, user: discord.Member):
+    if not ctx.author.guild_permissions.administrator:
+        await ctx.send("Você não tem permissão para usar este comando.")
+        return
+
+    # Buscar advertências do usuário
+    cursor.execute("SELECT moderator_id, reason FROM warns WHERE guild_id = ? AND user_id = ?", (ctx.guild.id, user.id))
+    warns = cursor.fetchall()
+
+    if not warns:
+        await ctx.send(f"{user.mention} não tem advertências.")
+        return
+
+    # Construir mensagem com as advertências
+    embed = discord.Embed(
+        title=f"Advertências de {user.name}",
+        color=discord.Color.blue()
+    )
+    for i, (moderator_id, reason) in enumerate(warns, 1):
+        moderator = ctx.guild.get_member(moderator_id)
+        embed.add_field(
+            name=f"Advertência {i}",
+            value=f"Moderador: {moderator.name if moderator else 'Desconhecido'}\nMotivo: {reason}",
+            inline=False
+        )
+
+    await ctx.send(embed=embed)
+
+# Função para remover uma advertência
+@bot.command(name="remove-warn")
+async def remove_warn(ctx, user: discord.Member, warn_index: int):
+    if not ctx.author.guild_permissions.administrator:
+        await ctx.send("Você não tem permissão para usar este comando.")
+        return
+
+    # Buscar advertências do usuário
+    cursor.execute("SELECT id FROM warns WHERE guild_id = ? AND user_id = ?", (ctx.guild.id, user.id))
+    warns = cursor.fetchall()
+
+    if not warns:
+        await ctx.send(f"{user.mention} não tem advertências.")
+        return
+
+    # Verificar se o índice é válido
+    if warn_index < 1 or warn_index > len(warns):
+        await ctx.send("Índice de advertência inválido.")
+        return
+
+    # Remover a advertência
+    warn_id = warns[warn_index - 1][0]
+    cursor.execute("DELETE FROM warns WHERE id = ?", (warn_id,))
+    conn.commit()
+
+    await ctx.send(f"Advertência {warn_index} de {user.mention} foi removida.")
+
+# Função para remover todas as advertências
+@bot.command(name="remove-all-warns")
+async def remove_all_warns(ctx, user: discord.Member):
+    if not ctx.author.guild_permissions.administrator:
+        await ctx.send("Você não tem permissão para usar este comando.")
+        return
+
+    # Remover todas as advertências do usuário
+    cursor.execute("DELETE FROM warns WHERE guild_id = ? AND user_id = ?", (ctx.guild.id, user.id))
+    conn.commit()
+
+    await ctx.send(f"Todas as advertências de {user.mention} foram removidas.")
+
+# Evento de inicialização
+@bot.event
+async def on_ready():
+    print(f"✅ Bot {bot.user.name} está online!")
+
+# Iniciar o bot
+bot.run(TOKEN)
