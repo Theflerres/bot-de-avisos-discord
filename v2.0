@@ -1,0 +1,156 @@
+import discord
+from discord.ext import commands
+import sqlite3
+from datetime import datetime
+import os
+
+# Configuração do bot
+TOKEN = "MEU_TOKEN_PORRA"  # Substitua pelo token do seu bot
+intents = discord.Intents.default()
+intents.message_content = True
+intents.guilds = True
+intents.members = True
+
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# Caminho para a pasta de logs
+LOG_FOLDER = r"C:\Users\jg202\OneDrive\Área de Trabalho\database"
+LOG_FILE = os.path.join(LOG_FOLDER, "warns_log.txt")
+
+# Criar a pasta de logs se não existir
+if not os.path.exists(LOG_FOLDER):
+    os.makedirs(LOG_FOLDER)
+
+# Conectar ao banco de dados SQLite
+conn = sqlite3.connect("warns.db")
+cursor = conn.cursor()
+
+# Criar tabela se não existir
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS warns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    moderator_id INTEGER NOT NULL,
+    reason TEXT NOT NULL
+)
+""")
+conn.commit()
+
+# Função para verificar se o usuário tem permissão
+def has_permission(ctx):
+    # Verifica se o usuário tem o cargo "Staff" ou "Moderador"
+    required_roles = ["Staff", "Moderador", "Chefia"]  # Adicione os cargos que podem usar os comandos
+    return any(role.name in required_roles for role in ctx.author.roles)
+
+# Função para adicionar log de advertência
+def add_warn_log(staff_name, user_name, reason):
+    now = datetime.now()
+    log_entry = f"{now.strftime('%d/%m/%Y %H:%M:%S')}\n"
+    log_entry += f"Staff: {staff_name}\n"
+    log_entry += f"- Usuário: {user_name}\n"
+    log_entry += f"- Motivo: {reason}\n"
+    log_entry += "-" * 30 + "\n"  # Separador entre logs
+
+    with open(LOG_FILE, "a", encoding="utf-8") as log_file:
+        log_file.write(log_entry)
+
+# Função para adicionar advertência
+@bot.command(name="warn")
+@commands.check(has_permission)
+async def warn(ctx, user: discord.Member, *, reason: str):
+    # Adicionar advertência ao banco de dados
+    cursor.execute("""
+    INSERT INTO warns (guild_id, user_id, moderator_id, reason)
+    VALUES (?, ?, ?, ?)
+    """, (ctx.guild.id, user.id, ctx.author.id, reason))
+    conn.commit()
+
+    # Adicionar log da advertência
+    add_warn_log(ctx.author.name, user.name, reason)
+
+    # Enviar mensagem ao usuário
+    
+
+    # Enviar mensagem no canal
+    embed = discord.Embed(
+        title="Advertência",
+        description=f"Usuário: {user.mention}\nMotivo: {reason}\n❌",
+        color=discord.Color.blue()
+    )
+    await ctx.send(embed=embed)
+
+# Função para ver advertências
+@bot.command(name="warns")
+@commands.check(has_permission)
+async def warns(ctx, user: discord.Member):
+    # Buscar advertências do usuário
+    cursor.execute("SELECT moderator_id, reason FROM warns WHERE guild_id = ? AND user_id = ?", (ctx.guild.id, user.id))
+    warns = cursor.fetchall()
+
+    if not warns:
+        await ctx.send(f"{user.mention} não tem advertências.")
+        return
+
+    # Construir mensagem com as advertências
+    embed = discord.Embed(
+        title=f"Advertências de {user.name}",
+        color=discord.Color.blue()
+    )
+    for i, (moderator_id, reason) in enumerate(warns, 1):
+        moderator = ctx.guild.get_member(moderator_id)
+        embed.add_field(
+            name=f"Advertência {i}",
+            value=f"Moderador: {moderator.name if moderator else 'Desconhecido'}\nMotivo: {reason}",
+            inline=False
+        )
+
+    await ctx.send(embed=embed)
+
+# Função para remover uma advertência
+@bot.command(name="remove-warn")
+@commands.check(has_permission)
+async def remove_warn(ctx, user: discord.Member, warn_index: int):
+    # Buscar advertências do usuário
+    cursor.execute("SELECT id FROM warns WHERE guild_id = ? AND user_id = ?", (ctx.guild.id, user.id))
+    warns = cursor.fetchall()
+
+    if not warns:
+        await ctx.send(f"{user.mention} não tem advertências.")
+        return
+
+    # Verificar se o índice é válido
+    if warn_index < 1 or warn_index > len(warns):
+        await ctx.send("Índice de advertência inválido.")
+        return
+
+    # Remover a advertência
+    warn_id = warns[warn_index - 1][0]
+    cursor.execute("DELETE FROM warns WHERE id = ?", (warn_id,))
+    conn.commit()
+
+    await ctx.send(f"Advertência {warn_index} de {user.mention} foi removida.")
+
+# Função para remover todas as advertências
+@bot.command(name="remove-all-warns")
+@commands.check(has_permission)
+async def remove_all_warns(ctx, user: discord.Member):
+    # Remover todas as advertências do usuário
+    cursor.execute("DELETE FROM warns WHERE guild_id = ? AND user_id = ?", (ctx.guild.id, user.id))
+    conn.commit()
+
+    await ctx.send(f"Todas as advertências de {user.mention} foram removidas.")
+
+# Evento de inicialização
+@bot.event
+async def on_ready():
+    print(f"✅ Bot {bot.user.name} está online!")
+
+# Tratamento de erros para comandos restritos
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CheckFailure):
+        await ctx.send("🚫 Você não tem permissão para usar este comando.")
+
+# Iniciar o bot
+bot.run(TOKEN)
