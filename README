@@ -1,10 +1,11 @@
 
 =========================================================================
 Esse código é um projeto para fazer um simples bot de advertencias no Discord.
-Funçoes do bot v2.5
--criar uma advertencia para um usuario
--remover uma advertencias de um usuario
--ver advertencias de um usuario
--remover todas as advertencias de um usuario
--Registro de cada advertencia enviado ao log no momento da advertencia
+Funçoes do bot v3.0
+-criar uma advertencia para um usuario.
+-remover uma advertencias de um usuario.
+-ver advertencias de um usuario.
+-remover todas as advertencias de um usuario.
+-Registro de cada advertencia enviado ao log no momento da advertencia.
+-Enviar mensagem na Dm da pessoa que tomou a Advertencia.
 ========================================================================
