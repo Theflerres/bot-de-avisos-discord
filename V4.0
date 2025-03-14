@@ -1,0 +1,512 @@
+import discord
+from discord.ext import commands
+import sqlite3
+from datetime import datetime
+import os
+import random
+
+# Configuração do bot
+TOKEN = "Meu_Token_porra"  # Substitua pelo token do seu bot
+intents = discord.Intents.default()
+intents.message_content = True
+intents.guilds = True
+intents.members = True
+
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# Caminho para a pasta de logs
+LOG_FOLDER = r"C:\Users\jg202\OneDrive\Área de Trabalho\database"
+LOG_FILE = os.path.join(LOG_FOLDER, "warns_log.txt")
+BLACKJACK_LOG_FILE = os.path.join(LOG_FOLDER, "blackjack_log.txt")
+
+# Criar a pasta de logs se não existir
+if not os.path.exists(LOG_FOLDER):
+    os.makedirs(LOG_FOLDER)
+
+# Conectar ao banco de dados SQLite
+conn = sqlite3.connect("warns.db")
+cursor = conn.cursor()
+
+# Criar tabelas se não existirem
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS warns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    moderator_id INTEGER NOT NULL,
+    reason TEXT NOT NULL
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS players (
+    user_id INTEGER PRIMARY KEY,
+    balance INTEGER DEFAULT 500,
+    last_daily TIMESTAMP
+)
+""")
+conn.commit()
+
+# Função para verificar se o usuário é o criador do bot
+CREATOR_NAME = "theflerres"  # Nome do criador do bot
+
+def is_creator(ctx):
+    return ctx.author.name == CREATOR_NAME
+
+# Função para adicionar log de advertência
+def add_warn_log(staff_name, user_name, reason):
+    now = datetime.now()
+    log_entry = f"{now.strftime('%d/%m/%Y %H:%M:%S')}\n"
+    log_entry += f"Staff: {staff_name}\n"
+    log_entry += f"- Usuário: {user_name}\n"
+    log_entry += f"- Motivo: {reason}\n"
+    log_entry += "-" * 30 + "\n"  # Separador entre logs
+
+    with open(LOG_FILE, "a", encoding="utf-8") as log_file:
+        log_file.write(log_entry)
+
+# Função para atualizar o log do Blackjack
+def update_blackjack_log(user_id, user_name, balance):
+    # Ler o arquivo de log atual
+    if os.path.exists(BLACKJACK_LOG_FILE):
+        with open(BLACKJACK_LOG_FILE, "r", encoding="utf-8") as log_file:
+            lines = log_file.readlines()
+    else:
+        lines = []
+
+    # Procurar pelo jogador no log
+    updated = False
+    for i, line in enumerate(lines):
+        if f"Player: {user_name}" in line:
+            lines[i + 1] = f"Dinheiro: {balance}\n"
+            updated = True
+            break
+
+    # Se o jogador não foi encontrado, adicionar um novo log
+    if not updated:
+        lines.append(f"Player: {user_name}\n")
+        lines.append(f"Dinheiro: {balance}\n")
+        lines.append("-" * 30 + "\n")
+
+    # Escrever o log atualizado
+    with open(BLACKJACK_LOG_FILE, "w", encoding="utf-8") as log_file:
+        log_file.writelines(lines)
+
+# Comando de ajuda
+@bot.command(name="cmds")
+async def cmds(ctx):
+    embed = discord.Embed(
+        title="📜 Comandos do Bot",
+        description="Aqui estão todos os comandos disponíveis:",
+        color=discord.Color.blue()
+    )
+
+    embed.add_field(
+        name="!adv [usuário] [motivo]",
+        value="Adverte um usuário. Exemplo: `!adv @usuário Falta de respeito`",
+        inline=False
+    )
+    embed.add_field(
+        name="!advs [usuário]",
+        value="Mostra as advertências de um usuário. Exemplo: `!advs @usuário`",
+        inline=False
+    )
+    embed.add_field(
+        name="!remove-adv [usuário] [índice]",
+        value="Remove uma advertência específica de um usuário. Exemplo: `!remove-adv @usuário 1`",
+        inline=False
+    )
+    embed.add_field(
+        name="!remove-all-advs [usuário]",
+        value="Remove todas as advertências de um usuário. Exemplo: `!remove-all-advs @usuário`",
+        inline=False
+    )
+    embed.add_field(
+        name="!daily",
+        value="Coleta 100$ diariamente.",
+        inline=False
+    )
+    embed.add_field(
+        name="!p21",
+        value="Inicia um jogo de Blackjack.",
+        inline=False
+    )
+    embed.add_field(
+        name="!bet <valor>",
+        value="Faz uma aposta no jogo de Blackjack.",
+        inline=False
+    )
+    embed.add_field(
+        name="!T21",
+        value="Mostra a tabela de líderes do Blackjack.",
+        inline=False
+    )
+    embed.add_field(
+        name="!cmds",
+        value="Mostra esta mensagem de ajuda.",
+        inline=False
+    )
+
+    await ctx.send(embed=embed)
+
+# Comando para coletar dinheiro diariamente
+@bot.command(name="daily")
+async def daily(ctx):
+    user_id = ctx.author.id
+    cursor.execute("SELECT last_daily FROM players WHERE user_id = ?", (user_id,))
+    result = cursor.fetchone()
+
+    now = datetime.now()
+    if result and result[0]:
+        last_daily = datetime.strptime(result[0], "%Y-%m-%d %H:%M:%S")
+        if (now - last_daily).total_seconds() < 86400:
+            await ctx.send("Você já coletou sua recompensa diária hoje. Tente novamente amanhã.")
+            return
+
+    cursor.execute("""
+    INSERT OR REPLACE INTO players (user_id, balance, last_daily)
+    VALUES (?, COALESCE((SELECT balance FROM players WHERE user_id = ?), 500) + 100, ?)
+    """, (user_id, user_id, now.strftime("%Y-%m-%d %H:%M:%S")))
+    conn.commit()
+
+    # Atualizar o log do Blackjack
+    cursor.execute("SELECT balance FROM players WHERE user_id = ?", (user_id,))
+    balance = cursor.fetchone()[0]
+    update_blackjack_log(user_id, ctx.author.name, balance)
+
+    await ctx.send("Você coletou 100$! Seu saldo foi atualizado.")
+
+# Dicionário para armazenar o estado do jogo
+games = {}
+
+# Funções para o jogo de Blackjack
+def draw_card():
+    return random.choice(["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"])
+
+def calculate_hand(hand):
+    value = 0
+    aces = 0
+    for card in hand:
+        if card in ["J", "Q", "K"]:
+            value += 10
+        elif card == "A":
+            value += 11
+            aces += 1
+        else:
+            value += int(card)
+    while value > 21 and aces:
+        value -= 10
+        aces -= 1
+    return value
+
+async def start_game(ctx, user_id):
+    game = games[user_id]
+    game["dealer_cards"] = [draw_card(), draw_card()]
+    game["player_cards"] = [draw_card(), draw_card()]
+
+    dealer_value = calculate_hand(game["dealer_cards"])
+    player_value = calculate_hand(game["player_cards"])
+
+    # Mostrar o estado inicial do jogo com fonte maior
+    embed = discord.Embed(title="🎴 **Blackjack**", color=discord.Color.green())
+    embed.add_field(
+        name="**Cartas do Dealer**",
+        value=f"`[{game['dealer_cards'][0]}, ?]`",
+        inline=False
+    )
+    embed.add_field(
+        name="**Suas Cartas**",
+        value=f"`{game['player_cards']}` (Total: **{player_value}**)",
+        inline=False
+    )
+    embed.add_field(
+        name="**Aposta**",
+        value=f"`{game['bet']}$`",
+        inline=False
+    )
+
+    # Adicionar descrição dos emojis
+    embed.add_field(
+        name="**Reações**",
+        value=(
+            "✅ **Hit**: Pede mais uma carta.\n"
+            "🛑 **Stand**: Para de pedir cartas.\n"
+            "🔄 **Double**: Dobra a aposta e recebe mais uma carta.\n"
+            "⏸️ **Pause**: Pausa o jogo."
+        ),
+        inline=False
+    )
+
+    message = await ctx.send(embed=embed)
+
+    # Adicionar reações para as opções do jogo
+    await message.add_reaction("✅")  # Hit
+    await message.add_reaction("🛑")  # Stand
+    await message.add_reaction("🔄")  # Double
+    await message.add_reaction("⏸️")  # Pause
+
+    game["message_id"] = message.id
+
+async def update_game(message, user_id):
+    game = games[user_id]
+    dealer_value = calculate_hand(game["dealer_cards"])
+    player_value = calculate_hand(game["player_cards"])
+
+    embed = discord.Embed(title="🎴 **Blackjack**", color=discord.Color.green())
+    embed.add_field(
+        name="**Cartas do Dealer**",
+        value=f"`[{game['dealer_cards'][0]}, ?]`",
+        inline=False
+    )
+    embed.add_field(
+        name="**Suas Cartas**",
+        value=f"`{game['player_cards']}` (Total: **{player_value}**)",
+        inline=False
+    )
+    embed.add_field(
+        name="**Aposta**",
+        value=f"`{game['bet']}$`",
+        inline=False
+    )
+
+    await message.edit(embed=embed)
+
+async def dealer_turn(message, user_id):
+    game = games[user_id]
+    dealer_value = calculate_hand(game["dealer_cards"])
+
+    while dealer_value < 17:
+        game["dealer_cards"].append(draw_card())
+        dealer_value = calculate_hand(game["dealer_cards"])
+
+    await end_game(message, user_id, "dealer_turn")
+
+async def end_game(message, user_id, result):
+    game = games[user_id]
+    dealer_value = calculate_hand(game["dealer_cards"])
+    player_value = calculate_hand(game["player_cards"])
+
+    # Definir a cor e a mensagem do resultado
+    if result == "bust":
+        color = discord.Color.red()
+        description = "**Você estourou!** O dealer venceu."
+    elif dealer_value > 21 or player_value > dealer_value:
+        color = discord.Color.green()
+        description = "**Você venceu!**"
+        cursor.execute("UPDATE players SET balance = balance + ? WHERE user_id = ?", (game["bet"] * 2, user_id))
+        conn.commit()
+    elif player_value == dealer_value:
+        color = discord.Color.blue()
+        description = "**Empate!** Sua aposta foi devolvida."
+        cursor.execute("UPDATE players SET balance = balance + ? WHERE user_id = ?", (game["bet"], user_id))
+        conn.commit()
+    else:
+        color = discord.Color.red()
+        description = "**O dealer venceu.**"
+
+    # Mostrar o resultado final com fonte maior
+    embed = discord.Embed(title="🎴 **Blackjack**", description=description, color=color)
+    embed.add_field(
+        name="**Cartas do Dealer**",
+        value=f"`{game['dealer_cards']}` (Total: **{dealer_value}**)",
+        inline=False
+    )
+    embed.add_field(
+        name="**Suas Cartas**",
+        value=f"`{game['player_cards']}` (Total: **{player_value}**)",
+        inline=False
+    )
+    embed.add_field(
+        name="**Aposta**",
+        value=f"`{game['bet']}$`",
+        inline=False
+    )
+
+    # Adicionar reação para iniciar um novo jogo
+    embed.add_field(
+        name="**Novo Jogo**",
+        value="Reaja com 🎲 para começar um novo jogo.",
+        inline=False
+    )
+
+    await message.edit(embed=embed)
+    await message.clear_reactions()  # Remove todas as reações
+    await message.add_reaction("🎲")  # Reação para novo jogo
+
+    # Atualizar o log do Blackjack
+    cursor.execute("SELECT balance FROM players WHERE user_id = ?", (user_id,))
+    balance = cursor.fetchone()[0]
+    update_blackjack_log(user_id, message.author.name, balance)
+
+    # Remover o jogo atual da lista de jogos ativos
+    del games[user_id]
+
+@bot.command(name="p21")
+async def play_21(ctx):
+    user_id = ctx.author.id
+
+    # Verificar se o jogador já está em um jogo
+    if user_id in games:
+        await ctx.send("Você já está em um jogo.")
+        return
+
+    # Inicializar o jogo
+    games[user_id] = {
+        "dealer_cards": [],
+        "player_cards": [],
+        "bet": 0,
+        "status": "waiting_for_bet"
+    }
+
+    await ctx.send(f"{ctx.author.mention}, você entrou no jogo de Blackjack! Use `!bet <valor>` para fazer sua aposta.")
+
+@bot.command(name="bet")
+async def bet(ctx, amount: int):
+    user_id = ctx.author.id
+
+    if user_id not in games:
+        await ctx.send("Você não está em um jogo. Use `!p21` para começar.")
+        return
+
+    if games[user_id]["status"] != "waiting_for_bet":
+        await ctx.send("Você já fez sua aposta.")
+        return
+
+    # Verificar saldo do jogador
+    cursor.execute("SELECT balance FROM players WHERE user_id = ?", (user_id,))
+    balance = cursor.fetchone()[0]
+
+    if amount > balance:
+        await ctx.send("Você não tem saldo suficiente para essa aposta.")
+        return
+
+    # Atualizar saldo e estado do jogo
+    cursor.execute("UPDATE players SET balance = balance - ? WHERE user_id = ?", (amount, user_id))
+    conn.commit()
+
+    games[user_id]["bet"] = amount
+    games[user_id]["status"] = "playing"
+
+    # Atualizar o log do Blackjack
+    cursor.execute("SELECT balance FROM players WHERE user_id = ?", (user_id,))
+    balance = cursor.fetchone()[0]
+    update_blackjack_log(user_id, ctx.author.name, balance)
+
+    await ctx.send(f"Aposta de {amount}$ feita com sucesso! O jogo começou.")
+    await start_game(ctx, user_id)
+
+@bot.event
+async def on_reaction_add(reaction, user):
+    if user.bot:
+        return
+
+    user_id = user.id
+
+    # Verificar se a reação é para iniciar um novo jogo
+    if reaction.emoji == "🎲":
+        if user_id in games:
+            await reaction.message.channel.send("Você já está em um jogo.")
+            return
+
+        # Iniciar um novo jogo
+        games[user_id] = {
+            "dealer_cards": [],
+            "player_cards": [],
+            "bet": 0,
+            "status": "waiting_for_bet"
+        }
+
+        await reaction.message.channel.send(f"{user.mention}, use `!bet <valor>` para fazer sua aposta.")
+        return
+
+    if user_id not in games:
+        return
+
+    game = games[user_id]
+    if game["message_id"] != reaction.message.id:
+        return
+
+    # Remover a reação após o jogador fazer sua jogada
+    await reaction.remove(user)
+
+    if reaction.emoji == "✅":  # Hit
+        game["player_cards"].append(draw_card())
+        player_value = calculate_hand(game["player_cards"])
+
+        if player_value > 21:
+            await end_game(reaction.message, user_id, "bust")
+        else:
+            await update_game(reaction.message, user_id)
+            await reaction.message.clear_reactions()  # Remove todas as reações após o hit
+
+    elif reaction.emoji == "🛑":  # Stand
+        await reaction.message.clear_reactions()  # Remove todas as reações
+        await dealer_turn(reaction.message, user_id)
+
+    elif reaction.emoji == "🔄":  # Double
+        cursor.execute("SELECT balance FROM players WHERE user_id = ?", (user_id,))
+        balance = cursor.fetchone()[0]
+
+        if game["bet"] * 2 > balance:
+            await reaction.message.channel.send("Você não tem saldo suficiente para dobrar a aposta.")
+            return
+
+        cursor.execute("UPDATE players SET balance = balance - ? WHERE user_id = ?", (game["bet"], user_id))
+        conn.commit()
+
+        game["bet"] *= 2
+        game["player_cards"].append(draw_card())
+        player_value = calculate_hand(game["player_cards"])
+
+        if player_value > 21:
+            await end_game(reaction.message, user_id, "bust")
+        else:
+            await reaction.message.clear_reactions()  # Remove todas as reações
+            await dealer_turn(reaction.message, user_id)
+
+    elif reaction.emoji == "⏸️":  # Pause
+        await reaction.message.channel.send("Jogo pausado. Use `!p21` para continuar.")
+        del games[user_id]
+
+@bot.command(name="T21")
+async def leaderboard(ctx):
+    # Buscar os 10 jogadores com mais dinheiro
+    cursor.execute("SELECT user_id, balance FROM players ORDER BY balance DESC LIMIT 10")
+    top_players = cursor.fetchall()
+
+    if not top_players:
+        await ctx.send("Nenhum jogador encontrado.")
+        return
+
+    # Construir a tabela de líderes
+    embed = discord.Embed(
+        title="🏆 Tabela de Líderes - Blackjack",
+        description="Top 10 jogadores com mais dinheiro:",
+        color=discord.Color.gold()
+    )
+
+    for i, (user_id, balance) in enumerate(top_players, 1):
+        user = await bot.fetch_user(user_id)
+        embed.add_field(
+            name=f"{i}. {user.name}",
+            value=f"Dinheiro: {balance}$",
+            inline=False
+        )
+
+    await ctx.send(embed=embed)
+
+# Evento de inicialização
+@bot.event
+async def on_ready():
+    print(f"✅ Bot {bot.user.name} está online!")
+
+# Tratamento de erros para comandos restritos
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CheckFailure):
+        await ctx.send("🚫 Você não tem permissão para usar este comando.")
+    elif isinstance(error, commands.CommandInvokeError):
+        await ctx.send("🚫 Este comando só pode ser usado no canal correto.")
+
+# Iniciar o bot
+bot.run(TOKEN)
