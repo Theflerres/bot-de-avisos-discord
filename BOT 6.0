@@ -1,0 +1,284 @@
+import discord
+from discord.ext import commands
+import sqlite3
+from datetime import datetime
+import os
+import re
+import tempfile
+import asyncio
+import atexit
+from yt_dlp import YoutubeDL
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+
+# --- CONFIGURAÇÕES GERAIS ---
+TOKEN = "Meutoken"  # Substitua pelo token do seu bot
+intents = discord.Intents.default()
+intents.message_content = True
+intents.guilds = True
+intents.members = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# --- CANAIS DE NOTIFICAÇÃO DE START/STOP ---
+channels_to_notify = [1376724217747341322, 1349002209794195526]
+bot_instance = None
+
+# --- PASTA DE LOGS E BANCO DE DADOS ---
+LOG_FOLDER = r"C:\Users\jg202\OneDrive\Área de Trabalho\database"
+os.makedirs(LOG_FOLDER, exist_ok=True)
+DB_PATH = os.path.join(LOG_FOLDER, "bot.db")
+LOG_FILE = os.path.join(LOG_FOLDER, "warns_log.txt")
+
+# --- CONEXÃO COM SQLITE ---
+conn = sqlite3.connect(DB_PATH)
+cursor = conn.cursor()
+
+# Criar tabela de advertências
+cursor.execute(
+    """
+    CREATE TABLE IF NOT EXISTS warns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        moderator_id INTEGER NOT NULL,
+        reason TEXT NOT NULL
+    )
+    """
+)
+# Criar tabela de cache de música
+cursor.execute(
+    """
+    CREATE TABLE IF NOT EXISTS music_cache (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        youtube_url TEXT UNIQUE,
+        drive_link TEXT,
+        title TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """
+)
+conn.commit()
+
+# --- PERMISSÕES ---
+ALLOWED_ROLES = [1282146997909979136, 1282147756814766132]
+ALLOWED_USER_ID = 299323165937500160
+CREATOR_NAME = "theflerres"
+
+def has_permission(ctx):
+    if ctx.author.name == CREATOR_NAME:
+        return True
+    return any(role.id in ALLOWED_ROLES for role in ctx.author.roles) or ctx.author.id == ALLOWED_USER_ID
+
+def is_correct_channel(ctx):
+    return ctx.channel.id == 1349002209794195526
+
+# --- LOG DE ADVERTÊNCIAS EM ARQUIVO ---
+def add_warn_log(staff_name, user_name, reason):
+    now = datetime.now()
+    entry = (
+        f"{now.strftime('%d/%m/%Y %H:%M:%S')}\n"
+        f"Staff: {staff_name}\n"
+        f"- Usuário: {user_name}\n"
+        f"- Motivo: {reason}\n"
+        + "-"*30 + "\n"
+    )
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(entry)
+
+# --- CONFIGURAÇÃO GOOGLE DRIVE ---
+CLIENT_SECRET_FILE = os.path.join(os.getcwd(), "client_secret.json")
+CREDENTIALS_PATH = os.path.join(LOG_FOLDER, "credentials.json")
+DRIVE_FOLDER_ID = "1U8-Pz2YamB1OSP-wAaT8Wzw-3VOKM8Hc"
+
+def get_drive_service():
+    scopes = ['https://www.googleapis.com/auth/drive.file']
+    creds = None
+    if os.path.exists(CREDENTIALS_PATH):
+        creds = Credentials.from_authorized_user_file(CREDENTIALS_PATH, scopes)
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_FILE, scopes)
+            creds = flow.run_local_server(port=0)
+        with open(CREDENTIALS_PATH, 'w') as token:
+            token.write(creds.to_json())
+    return build('drive', 'v3', credentials=creds)
+
+def download_audio(youtube_url):
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': os.path.join(tempfile.gettempdir(), '%(id)s.%(ext)s'),
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
+        'quiet': True,
+    }
+    with YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(youtube_url, download=True)
+        filename = ydl.prepare_filename(info)
+        base, _ = os.path.splitext(filename)
+        return base + ".mp3", info.get('title', 'audio')
+
+def upload_to_drive(file_path, title):
+    service = get_drive_service()
+    metadata = {'name': f"{title}.mp3", 'parents': [DRIVE_FOLDER_ID]}
+    media = MediaFileUpload(file_path, mimetype='audio/mpeg')
+    file = service.files().create(body=metadata, media_body=media, fields='id').execute()
+    fid = file.get('id')
+    service.permissions().create(fileId=fid, body={'role':'reader','type':'anyone'}).execute()
+    return f"https://drive.google.com/uc?export=download&id={fid}"
+
+# --- COMANDOS ---
+@bot.command(name="cmds")
+async def cmds(ctx):
+    embed = discord.Embed(title="📜 Comandos do Bot", color=discord.Color.blue())
+    embed.add_field(name="!adv [usuário] [motivo]", value="Adverte um usuário.", inline=False)
+    embed.add_field(name="!advs [usuário]", value="Mostra advertências de um usuário.", inline=False)
+    embed.add_field(name="!remove-adv [usuário] [índice]", value="Remove uma advertência.", inline=False)
+    embed.add_field(name="!remove-all-advs [usuário]", value="Remove todas advertências.", inline=False)
+    embed.add_field(name="!cmusica [YouTube URL]", value="Baixa áudio, envia ao Drive e retorna link.", inline=False)
+    await ctx.send(embed=embed)
+
+@bot.command(name="adv")
+@commands.check(has_permission)
+@commands.check(is_correct_channel)
+async def adv(ctx, user: discord.Member, *, reason: str):
+    cursor.execute(
+        "INSERT INTO warns (guild_id, user_id, moderator_id, reason) VALUES (?, ?, ?, ?)",
+        (ctx.guild.id, user.id, ctx.author.id, reason)
+    )
+    conn.commit()
+    add_warn_log(ctx.author.name, user.name, reason)
+    count = cursor.execute(
+        "SELECT COUNT(*) FROM warns WHERE guild_id=? AND user_id=?",
+        (ctx.guild.id, user.id)
+    ).fetchone()[0]
+    x_emojis = "❌ " * count
+    # DM ao usuário
+    embed_dm = discord.Embed(
+        title="Você recebeu uma advertência",
+        description=f"Motivo: {reason}\n{x_emojis}",
+        color=discord.Color.red()
+    )
+    await user.send(embed=embed_dm)
+    # Notifica no canal
+    embed_ch = discord.Embed(
+        title="Advertência registrada",
+        description=f"Usuário: {user.mention}\nMotivo: {reason}\n{x_emojis}",
+        color=discord.Color.blue()
+    )
+    await ctx.send(embed=embed_ch)
+
+@bot.command(name="advs")
+@commands.check(has_permission)
+@commands.check(is_correct_channel)
+async def advs(ctx, user: discord.Member):
+    cursor.execute(
+        "SELECT moderator_id, reason FROM warns WHERE guild_id=? AND user_id=?",
+        (ctx.guild.id, user.id)
+    )
+    rows = cursor.fetchall()
+    if not rows:
+        return await ctx.send(f"{user.mention} não tem advertências.")
+    embed = discord.Embed(title=f"Advertências de {user.name}", color=discord.Color.blue())
+    for idx, (mod_id, reason) in enumerate(rows, start=1):
+        mod = ctx.guild.get_member(mod_id)
+        embed.add_field(
+            name=f"{idx}.",
+            value=f"Moderador: {mod.name if mod else mod_id}\nMotivo: {reason}",
+            inline=False
+        )
+    await ctx.send(embed=embed)
+
+@bot.command(name="remove-adv")
+@commands.check(has_permission)
+@commands.check(is_correct_channel)
+async def remove_adv(ctx, user: discord.Member, index: int):
+    cursor.execute(
+        "SELECT id FROM warns WHERE guild_id=? AND user_id=?",
+        (ctx.guild.id, user.id)
+    )
+    warns = cursor.fetchall()
+    if not warns or index < 1 or index > len(warns):
+        return await ctx.send("Índice inválido ou sem advertências.")
+    warn_id = warns[index-1][0]
+    cursor.execute("DELETE FROM warns WHERE id=?", (warn_id,))
+    conn.commit()
+    await ctx.send(f"Advertência #{index} de {user.mention} removida.")
+
+@bot.command(name="remove-all-advs")
+@commands.check(has_permission)
+@commands.check(is_correct_channel)
+async def remove_all_advs(ctx, user: discord.Member):
+    cursor.execute("DELETE FROM warns WHERE guild_id=? AND user_id=?",
+                   (ctx.guild.id, user.id))
+    conn.commit()
+    await ctx.send(f"Todas as advertências de {user.mention} foram removidas.")
+
+@bot.command(name="cmusica", aliases=["Cmusica"])
+async def cmusica(ctx, youtube_url: str):
+    if not re.match(r"https?://(www\.)?youtu", youtube_url):
+        return await ctx.send("❌ Envie uma URL válida do YouTube.")
+    row = cursor.execute(
+        "SELECT drive_link FROM music_cache WHERE youtube_url=?",
+        (youtube_url,)
+    ).fetchone()
+    if row:
+        return await ctx.send(f"🔁 Música já no Drive:\n{row[0]}")
+    msg = await ctx.send("⏬ Baixando áudio...")
+    try:
+        path, title = download_audio(youtube_url)
+        await msg.edit(content="⬆️ Enviando ao Drive...")
+        drive_link = upload_to_drive(path, title)
+        cursor.execute(
+            "INSERT INTO music_cache (youtube_url, drive_link, title) VALUES (?,?,?)",
+            (youtube_url, drive_link, title)
+        )
+        conn.commit()
+        await msg.edit(content=f"✅ Música pronta!\n{title}\n{drive_link}")
+    except Exception as e:
+        await msg.edit(content=f"❌ Erro: {e}")
+    finally:
+        if 'path' in locals() and os.path.exists(path):
+            os.remove(path)
+
+# --- EVENTOS ---
+@bot.event
+async def on_ready():
+    global bot_instance
+    bot_instance = bot
+    print(f"✅ Bot {bot.user.name} está online!")
+    for cid in channels_to_notify:
+        ch = bot.get_channel(cid)
+        if ch:
+            asyncio.create_task(ch.send("🟢 Bot iniciado no Visual Studio Code."))
+
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CheckFailure):
+        await ctx.send("🚫 Você não tem permissão para usar este comando.")
+    elif isinstance(error, commands.CommandInvokeError):
+        await ctx.send("🚫 Este comando só pode ser usado no canal correto.")
+    else:
+        await ctx.send(f"🚫 Erro: {error}")
+
+# --- NOTIFICAÇÃO DE DESLIGAMENTO ---
+def notify_shutdown():
+    if bot_instance:
+        loop = asyncio.get_event_loop()
+        for cid in channels_to_notify:
+            ch = bot_instance.get_channel(cid)
+            if ch:
+                loop.create_task(ch.send("🔴 Bot desligado no Visual Studio Code."))
+
+atexit.register(notify_shutdown)
+
+# --- INICIA BOT ---
+bot.run(TOKEN)
+
