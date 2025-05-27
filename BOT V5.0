@@ -1,0 +1,187 @@
+import discord
+from discord.ext import commands
+import sqlite3
+from datetime import datetime
+import os
+import re
+import tempfile
+from yt_dlp import YoutubeDL
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+
+# Configuração do bot
+TOKEN = "Meu_token"  # Substitua pelo token do seu bot
+intents = discord.Intents.default()
+intents.message_content = True
+intents.guilds = True
+intents.members = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# Configurar diretórios e banco de dados
+LOG_FOLDER = r"C:\Users\jg202\OneDrive\Área de Trabalho\database"
+DB_PATH = os.path.join(LOG_FOLDER, "warns.db")
+CLIENT_SECRET_FILE = os.path.join(os.getcwd(), "client_secret.json")
+CREDENTIALS_PATH = os.path.join(LOG_FOLDER, "credentials.json")
+DRIVE_FOLDER_ID = "1U8-Pz2YamB1OSP-wAaT8Wzw-3VOKM8Hc"
+
+# Certificar de que a pasta existe
+os.makedirs(LOG_FOLDER, exist_ok=True)
+
+# Conexão SQLite
+conn = sqlite3.connect(DB_PATH)
+cursor = conn.cursor()
+# Criar tabelas se não existirem
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS warns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER,
+    user_id INTEGER,
+    moderator_id INTEGER,
+    reason TEXT
+)
+""")
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS music_cache (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    youtube_url TEXT UNIQUE,
+    drive_link TEXT,
+    title TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+""")
+conn.commit()
+
+# Permissões do comando adv
+ALLOWED_ROLES = [1282146997909979136, 1282147756814766132]
+ALLOWED_USER_ID = [299323165937500160, 567087365705826307]
+CREATOR_NAME = "theflerres"
+
+def has_permission(ctx):
+    if ctx.author.name == CREATOR_NAME:
+        return True
+    return any(role.id in ALLOWED_ROLES for role in ctx.author.roles) or ctx.author.id in ALLOWED_USER_ID
+
+# Função para log de advertência
+def add_warn_log(staff_name, user_name, reason):
+    with open(os.path.join(LOG_FOLDER, "warns_log.txt"), "a", encoding="utf-8") as f:
+        f.write(f"{datetime.now():%d/%m/%Y %H:%M:%S}\nStaff: {staff_name}\n- Usuário: {user_name}\n- Motivo: {reason}\n{'-'*30}\n")
+
+# Inicializar serviço Google Drive via OAuth2
+def get_drive_service():
+    scopes = ['https://www.googleapis.com/auth/drive.file']
+    creds = None
+    if os.path.exists(CREDENTIALS_PATH):
+        creds = Credentials.from_authorized_user_file(CREDENTIALS_PATH, scopes)
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_FILE, scopes)
+            creds = flow.run_local_server(port=0)
+        with open(CREDENTIALS_PATH, 'w') as token:
+            token.write(creds.to_json())
+    return build('drive', 'v3', credentials=creds)
+
+# Baixar áudio do YouTube com youtube_dl
+def download_audio(youtube_url):
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': os.path.join(tempfile.gettempdir(), '%(id)s.%(ext)s'),
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
+        'quiet': True,
+    }
+    with YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(youtube_url, download=True)
+        filename = ydl.prepare_filename(info)
+        base, _ = os.path.splitext(filename)
+        return base + ".mp3", info.get('title', 'audio')
+
+# Fazer upload da música para o Drive
+def upload_to_drive(file_path, title):
+    service = get_drive_service()
+    metadata = {'name': f"{title}.mp3", 'parents': [DRIVE_FOLDER_ID]}
+    media = MediaFileUpload(file_path, mimetype='audio/mpeg')
+    file = service.files().create(body=metadata, media_body=media, fields='id').execute()
+    fid = file.get('id')
+    service.permissions().create(fileId=fid, body={'role':'reader','type':'anyone'}).execute()
+    return f"https://drive.google.com/uc?export=download&id={fid}"
+
+# Comando de ajuda (aberto a todos)
+@bot.command(name="cmds")
+async def cmds(ctx):
+    embed = discord.Embed(title="📜 Comandos do Bot", color=discord.Color.blue())
+    embed.add_field(name="!adv [usuário] [motivo]", value="Adverte um usuário.", inline=False)
+    embed.add_field(name="!cmusica [YouTube URL]", value="Baixa, envia ao Drive e retorna link.", inline=False)
+    await ctx.send(embed=embed)
+
+# Comando de advertência (restrito)
+@bot.command(name="adv")
+@commands.check(has_permission)
+async def adv(ctx, user: discord.Member, *, reason: str):
+    cursor.execute(
+        "INSERT INTO warns (guild_id,user_id,moderator_id,reason) VALUES (?,?,?,?)",
+        (ctx.guild.id, user.id, ctx.author.id, reason)
+    )
+    conn.commit()
+    add_warn_log(ctx.author.name, user.name, reason)
+    count = cursor.execute(
+        "SELECT COUNT(*) FROM warns WHERE guild_id=? AND user_id=?",
+        (ctx.guild.id, user.id)
+    ).fetchone()[0]
+    embed = discord.Embed(
+        title="Advertência",
+        description=f"{user.mention}\n{reason}\n{'❌ '*count}",
+        color=discord.Color.red()
+    )
+    await ctx.send(embed=embed)
+
+# Comando para baixar música e enviar ao Drive (aberto a todos)
+@bot.command(name="cmusica", aliases=["Cmusica"])
+async def cmusica(ctx, youtube_url: str):
+    if not re.match(r"https?://(www\.)?youtu", youtube_url):
+        return await ctx.send("❌ Envie uma URL válida do YouTube.")
+    # Checar cache
+    row = cursor.execute(
+        "SELECT drive_link FROM music_cache WHERE youtube_url=?",
+        (youtube_url,)
+    ).fetchone()
+    if row:
+        return await ctx.send(f"🔁 Música já no Drive:\n{row[0]}")
+    msg = await ctx.send("⏬ Baixando áudio...")
+    try:
+        path, title = download_audio(youtube_url)
+        await msg.edit(content="⬆️ Enviando ao Drive...")
+        drive_link = upload_to_drive(path, title)
+        cursor.execute(
+            "INSERT INTO music_cache (youtube_url,drive_link,title) VALUES (?,?,?)",
+            (youtube_url, drive_link, title)
+        )
+        conn.commit()
+        await msg.edit(content=f"✅ Música pronta!\n{title}\n{drive_link}")
+    except Exception as e:
+        await msg.edit(content=f"❌ Erro: {e}")
+    finally:
+        if 'path' in locals() and os.path.exists(path):
+            os.remove(path)
+
+# Eventos
+@bot.event
+async def on_ready():
+    print(f"✅ Bot {bot.user.name} está online e pronto!")
+
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CheckFailure):
+        await ctx.send("🚫 Você não tem permissão para usar este comando.")
+    else:
+        await ctx.send(f"🚫 Erro: {error}")
+
+# Iniciar bot
+bot.run(TOKEN)
