@@ -1,0 +1,613 @@
+import discord
+from discord.ext import commands
+import sqlite3
+from datetime import datetime, timedelta # timedelta para timeout
+import os
+import re
+import tempfile
+import asyncio
+import atexit
+from yt_dlp import YoutubeDL
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+
+# --- CONFIGURAÇÕES GERAIS ---
+TOKEN = "MEUTOKEN"  # Substitua pelo token do seu bot
+intents = discord.Intents.default()
+intents.message_content = True
+intents.guilds = True
+intents.members = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# --- CANAIS DE NOTIFICAÇÃO DE START/STOP ---
+channels_to_notify = [1376724217747341322, 1349002209794195526] # Adapte conforme necessário
+bot_instance = None
+
+# --- CANAIS PARA FUNCIONALIDADE DE MÚSICA ---
+ADMIN_APPROVAL_CHANNEL_ID = 1376724217747341322 # Canal para ADMs aprovarem
+USER_MUSIC_CHANNEL_ID = 1281458329683623958 # Canal onde usuários pedem músicas
+MAX_SONG_SIZE_MB = 40 # Limite em MB
+
+# --- PASTA DE LOGS E BANCO DE DADOS ---
+LOG_FOLDER = r"C:\Users\jg202\OneDrive\Área de Trabalho\database" # Adapte o caminho se necessário
+os.makedirs(LOG_FOLDER, exist_ok=True)
+DB_PATH = os.path.join(LOG_FOLDER, "bot.db")
+LOG_FILE = os.path.join(LOG_FOLDER, "warns_log.txt")
+
+# --- CONEXÃO COM SQLITE ---
+conn = sqlite3.connect(DB_PATH)
+cursor = conn.cursor()
+
+# Criar tabela de advertências
+cursor.execute(
+    """
+    CREATE TABLE IF NOT EXISTS warns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        moderator_id INTEGER NOT NULL,
+        reason TEXT NOT NULL
+    )
+    """
+)
+# Criar tabela de cache de música
+cursor.execute(
+    """
+    CREATE TABLE IF NOT EXISTS music_cache (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        youtube_url TEXT UNIQUE,
+        drive_link TEXT,
+        title TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """
+)
+conn.commit()
+
+# --- PERMISSÕES ---
+ALLOWED_ROLES = [1282146997909979136, 1282147756814766132] # Adapte os IDs dos cargos
+ALLOWED_USER_ID = 299323165937500160 # Adapte o ID do usuário
+CREATOR_NAME = "theflerres" # Adapte o nome do criador
+
+def has_permission(ctx):
+    if ctx.author.name == CREATOR_NAME:
+        return True
+    return any(role.id in ALLOWED_ROLES for role in ctx.author.roles) or ctx.author.id == ALLOWED_USER_ID
+
+def is_correct_channel(ctx): # Para comandos de advertência
+    return ctx.channel.id == 1349002209794195526 # Adapte o ID do canal
+
+def is_user_music_channel(ctx): # Para comandos de música
+    return ctx.channel.id == USER_MUSIC_CHANNEL_ID
+
+# --- LOG DE ADVERTÊNCIAS EM ARQUIVO ---
+def add_warn_log(staff_name, user_name, reason):
+    now = datetime.now()
+    entry = (
+        f"{now.strftime('%d/%m/%Y %H:%M:%S')}\n"
+        f"Staff: {staff_name}\n"
+        f"- Usuário: {user_name}\n"
+        f"- Motivo: {reason}\n"
+        + "-"*30 + "\n"
+    )
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(entry)
+
+# --- CONFIGURAÇÃO GOOGLE DRIVE ---
+CLIENT_SECRET_FILE = os.path.join(os.getcwd(), "client_secret.json")
+CREDENTIALS_PATH = os.path.join(LOG_FOLDER, "credentials.json")
+DRIVE_FOLDER_ID = "1U8-Pz2YamB1OSP-wAaT8Wzw-3VOKM8Hc" # Substitua pelo ID da sua pasta no Drive
+
+def get_drive_service():
+    scopes = ['https://www.googleapis.com/auth/drive.file']
+    creds = None
+    if os.path.exists(CREDENTIALS_PATH):
+        creds = Credentials.from_authorized_user_file(CREDENTIALS_PATH, scopes)
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            if not os.path.exists(CLIENT_SECRET_FILE):
+                print(f"ERRO CRÍTICO: O arquivo '{CLIENT_SECRET_FILE}' não foi encontrado. O bot não poderá autenticar com o Google Drive.")
+                return None # Retorna None para indicar falha
+            flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_FILE, scopes)
+            creds = flow.run_local_server(port=0)
+        with open(CREDENTIALS_PATH, 'w') as token_file: # Renomeado para token_file
+            token_file.write(creds.to_json())
+    return build('drive', 'v3', credentials=creds)
+
+def format_duration(seconds):
+    if seconds is None:
+        return "N/A"
+    minutes = int(seconds // 60)
+    seconds = int(seconds % 60)
+    return f"{minutes:02d}:{seconds:02d}"
+
+def format_filesize(bytes_size):
+    if bytes_size is None or bytes_size == 0:
+        return "N/A"
+    mb_size = bytes_size / (1024 * 1024)
+    return f"{mb_size:.2f} MB"
+
+def get_song_info(youtube_url):
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'quiet': True,
+        'noplaylist': True,
+    }
+    with YoutubeDL(ydl_opts) as ydl:
+        try:
+            info = ydl.extract_info(youtube_url, download=False)
+        except Exception as e:
+            print(f"Erro ao extrair info de {youtube_url}: {e}")
+            return None, None, None, None
+
+        title = info.get('title', 'Título Desconhecido')
+        duration = info.get('duration')
+        uploader = info.get('uploader', 'Uploader Desconhecido')
+        filesize = None
+        if 'formats' in info:
+            for f_format in info['formats']:
+                if f_format.get('vcodec') == 'none' and f_format.get('acodec') != 'none':
+                    if f_format.get('filesize'):
+                        filesize = f_format['filesize']
+                        break
+                    elif f_format.get('filesize_approx'):
+                        filesize = f_format['filesize_approx']
+                        break
+        if filesize is None:
+            filesize = info.get('filesize') or info.get('filesize_approx')
+        return title, duration, filesize, uploader
+
+def download_audio_file(youtube_url, temp_dir):
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': os.path.join(temp_dir, '%(id)s.%(ext)s'),
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
+        'quiet': True,
+        'noplaylist': True,
+    }
+    with YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(youtube_url, download=True)
+        filename = ydl.prepare_filename(info)
+        base, _ = os.path.splitext(filename)
+        return base + ".mp3", info.get('title', 'audio')
+
+def upload_to_drive(file_path, title):
+    service = get_drive_service()
+    if not service: # Se get_drive_service falhou
+        print("Upload para o Drive falhou: serviço não autenticado.")
+        raise Exception("Serviço do Google Drive não autenticado.")
+
+    file_name_on_drive = f"{title}.mp3"
+    file_name_on_drive = re.sub(r'[<>:"/\\|?*]', '', file_name_on_drive)
+    
+    metadata = {'name': file_name_on_drive, 'parents': [DRIVE_FOLDER_ID]}
+    media = MediaFileUpload(file_path, mimetype='audio/mpeg', resumable=True)
+    
+    file = service.files().create(body=metadata, media_body=media, fields='id, webViewLink').execute()
+    fid = file.get('id')
+    service.permissions().create(fileId=fid, body={'role':'reader','type':'anyone'}).execute()
+    return f"https://drive.google.com/uc?export=download&id={fid}"
+
+# --- VIEW DE APROVAÇÃO ---
+class ApprovalView(discord.ui.View):
+    def __init__(self, requester: discord.Member, timeout_duration=1800):
+        super().__init__(timeout=timeout_duration)
+        self.approved = None
+        self.interaction_user = None
+        self.requester = requester
+        self.message_to_edit = None
+
+    async def on_timeout(self):
+        self.approved = False
+        for item in self.children:
+            item.disabled = True
+        if self.message_to_edit:
+            try:
+                content = self.message_to_edit.content + f"\n\n**Tempo esgotado!** A solicitação de {self.requester.mention} foi automaticamente rejeitada."
+                await self.message_to_edit.edit(content=content, view=self)
+            except discord.NotFound:
+                pass
+        self.stop()
+
+    @discord.ui.button(label="Aprovar ✅", style=discord.ButtonStyle.green, custom_id="approve_song")
+    async def approve_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.approved = True
+        self.interaction_user = interaction.user
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(content=interaction.message.content + f"\n\n**Aprovado por {interaction.user.mention}**", view=self)
+        self.stop()
+
+    @discord.ui.button(label="Rejeitar ❌", style=discord.ButtonStyle.red, custom_id="reject_song")
+    async def reject_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.approved = False
+        self.interaction_user = interaction.user
+        for item in self.children:
+            item.disabled = True
+        # Mensagem genérica de rejeição no canal de admin (sem mencionar quem rejeitou)
+        await interaction.response.edit_message(content=interaction.message.content + "\n\n**Solicitação Rejeitada.**", view=self)
+        self.stop()
+
+# --- FUNÇÃO AUXILIAR PARA PROCESSAR MÚSICA COM APROVAÇÃO ---
+async def process_music_with_approval(ctx_or_interaction, youtube_url: str, requesting_user: discord.Member):
+    admin_channel = bot.get_channel(ADMIN_APPROVAL_CHANNEL_ID)
+    if not admin_channel:
+        msg = "Canal de administração não encontrado. Contate um desenvolvedor."
+        if isinstance(ctx_or_interaction, commands.Context): await ctx_or_interaction.send(msg)
+        else: await ctx_or_interaction.followup.send(msg, ephemeral=True)
+        return
+
+    user_pending_message = None # Inicializa para ter um valor padrão
+
+    title, duration_s, filesize_bytes, uploader = get_song_info(youtube_url)
+
+    if title is None:
+        msg = "❌ Não foi possível obter informações da música. Verifique o link ou tente novamente mais tarde."
+        if isinstance(ctx_or_interaction, commands.Context): await ctx_or_interaction.send(msg)
+        else: await ctx_or_interaction.followup.send(msg, ephemeral=True)
+        return
+
+    filesize_mb = (filesize_bytes / (1024 * 1024)) if filesize_bytes else 0
+
+    if filesize_mb > MAX_SONG_SIZE_MB:
+        msg = (f"❌ A música **{title}** excede o limite de tamanho de **{MAX_SONG_SIZE_MB} MB** "
+               f"(Tamanho estimado: {format_filesize(filesize_bytes)}). Não será processada.")
+        if isinstance(ctx_or_interaction, commands.Context): await ctx_or_interaction.send(msg)
+        else: await ctx_or_interaction.followup.send(msg, ephemeral=True)
+        await admin_channel.send(f"ℹ️ Tentativa de adicionar música ({title}) acima do limite por {requesting_user.mention} ({format_filesize(filesize_bytes)}).")
+        return
+
+    approval_view = ApprovalView(requester=requesting_user)
+    
+    embed_admin = discord.Embed(
+        title="🎵 Solicitação de Música Pendente",
+        description=f"O usuário {requesting_user.mention} (`{requesting_user.id}`) solicitou a seguinte música:",
+        color=discord.Color.orange()
+    )
+    embed_admin.add_field(name="Título", value=title, inline=False)
+    embed_admin.add_field(name="Duração", value=format_duration(duration_s), inline=True)
+    embed_admin.add_field(name="Tamanho Estimado", value=format_filesize(filesize_bytes), inline=True)
+    embed_admin.add_field(name="Uploader", value=uploader, inline=False)
+    embed_admin.add_field(name="Link YouTube", value=youtube_url, inline=False)
+    embed_admin.set_footer(text="Aguardando aprovação...")
+
+    try:
+        admin_message = await admin_channel.send(embed=embed_admin, view=approval_view)
+        approval_view.message_to_edit = admin_message
+    except discord.Forbidden:
+        msg = "❌ Erro: O bot não tem permissão para enviar mensagens no canal de administração."
+        if isinstance(ctx_or_interaction, commands.Context): await ctx_or_interaction.send(msg)
+        else: await ctx_or_interaction.followup.send(msg, ephemeral=True)
+        return
+    
+    pending_msg_content = f"⏳ Sua solicitação para a música **{title}** foi enviada para aprovação. Você será notificado."
+    try:
+        if isinstance(ctx_or_interaction, commands.Context):
+            user_pending_message = await ctx_or_interaction.send(pending_msg_content)
+        else: 
+            user_pending_message = await ctx_or_interaction.followup.send(pending_msg_content, ephemeral=True)
+    except discord.HTTPException as e:
+        print(f"[WARN] Falha ao enviar mensagem pendente ao usuário {requesting_user.name}: {e}")
+        # user_pending_message continuará None, o código abaixo lidará com isso
+
+
+    await approval_view.wait()
+
+    if approval_view.approved:
+        status_update_msg = f"✅ Sua música **{title}** foi aprovada! Baixando e enviando ao Drive..."
+        try:
+            if user_pending_message and hasattr(user_pending_message, 'edit'):
+                await user_pending_message.edit(content=status_update_msg)
+            elif isinstance(ctx_or_interaction, commands.Context): # Se user_pending_message falhou, tenta enviar um novo
+                user_pending_message = await ctx_or_interaction.send(status_update_msg) # Tenta enviar de novo e armazena para editar depois
+            else: # Interação
+                 await ctx_or_interaction.followup.send(status_update_msg, ephemeral=True) # Não tentamos editar followups
+        except discord.HTTPException as e:
+            print(f"[WARN] Falha ao editar/enviar mensagem de 'aprovada' para {requesting_user.name}: {e}")
+
+
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                audio_path, actual_title = download_audio_file(youtube_url, temp_dir)
+                drive_link = upload_to_drive(audio_path, actual_title)
+                
+                cursor.execute(
+                    "INSERT INTO music_cache (youtube_url, drive_link, title) VALUES (?,?,?)",
+                    (youtube_url, drive_link, actual_title)
+                )
+                conn.commit()
+                
+                final_msg = f"🎶 Música **{actual_title}** pronta!\n{drive_link}"
+                if user_pending_message and hasattr(user_pending_message, 'edit'):
+                     await user_pending_message.edit(content=final_msg)
+                elif isinstance(ctx_or_interaction, commands.Context): 
+                    await ctx_or_interaction.send(final_msg) # Envia novo se não pôde editar
+                else: 
+                    await ctx_or_interaction.followup.send(final_msg, ephemeral=True)
+
+                embed_admin.set_footer(text=f"Aprovado por {approval_view.interaction_user.name}. Link: {drive_link}")
+                embed_admin.color = discord.Color.green()
+                if approval_view.message_to_edit: await approval_view.message_to_edit.edit(embed=embed_admin)
+
+        except Exception as e:
+            error_msg = f"❌ Ocorreu um erro ao processar a música **{title}** após aprovação: {e}"
+            print(f"[ERROR_POST_APPROVAL] Erro no processamento pós-aprovação para {youtube_url}: {e}\nTraceback: {e.__traceback__}")
+            if user_pending_message and hasattr(user_pending_message, 'edit'):
+                await user_pending_message.edit(content=error_msg)
+            elif isinstance(ctx_or_interaction, commands.Context):
+                 await ctx_or_interaction.send(error_msg)
+            else:
+                await ctx_or_interaction.followup.send(error_msg, ephemeral=True)
+            
+            if approval_view.message_to_edit:
+                embed_admin.set_footer(text=f"Erro após aprovação por {approval_view.interaction_user.name}: {e}")
+                embed_admin.color = discord.Color.dark_red()
+                await approval_view.message_to_edit.edit(embed=embed_admin)
+    else: # Rejeitado ou Timeout
+        reason = "rejeitada" if approval_view.interaction_user else "expirou (timeout)"
+        current_title = title if title else "Música desconhecida"
+        # Mensagem genérica para o usuário, sem mencionar quem rejeitou
+        status_update_msg = f"❌ Sua solicitação para a música **{current_title}** foi **{reason}**."
+
+        try:
+            if isinstance(ctx_or_interaction, commands.Context):
+                if user_pending_message and hasattr(user_pending_message, 'edit'):
+                    await user_pending_message.edit(content=status_update_msg)
+                else: 
+                    await ctx_or_interaction.send(status_update_msg)
+            else: 
+                await ctx_or_interaction.followup.send(status_update_msg, ephemeral=True)
+        except discord.NotFound:
+            print(f"[DEBUG] Mensagem pendente do usuário (para {requesting_user.name}) não encontrada ao tentar notificar rejeição.")
+        except discord.Forbidden:
+            print(f"[DEBUG] Bot sem permissão para editar/enviar mensagem de rejeição ao usuário {requesting_user.name}.")
+        except Exception as e_user_notify:
+            print(f"[ERROR_USER_NOTIFY_REJECTION] Erro ao notificar usuário sobre rejeição: {e_user_notify}\nTraceback: {e_user_notify.__traceback__}")
+
+        if approval_view.interaction_user: # Rejeitado por clique de botão
+            try:
+                if approval_view.message_to_edit and hasattr(approval_view.message_to_edit, 'edit'):
+                    # Rodapé genérico para o admin
+                    footer_text = "Solicitação Rejeitada" 
+                    
+                    final_admin_embed = embed_admin.copy() 
+                    final_admin_embed.set_footer(text=footer_text)
+                    final_admin_embed.color = discord.Color.red()
+                    
+                    await approval_view.message_to_edit.edit(embed=final_admin_embed)
+            except discord.NotFound:
+                print(f"[DEBUG] Mensagem de aprovação do ADM (ID: {approval_view.message_to_edit.id if approval_view.message_to_edit else 'N/A'}) não encontrada para atualização do embed de rejeição.")
+            except discord.Forbidden:
+                print(f"[DEBUG] Bot sem permissão para editar mensagem de aprovação do ADM (ID: {approval_view.message_to_edit.id if approval_view.message_to_edit else 'N/A'}) para embed de rejeição.")
+            except Exception as e_admin_edit:
+                print(f"[ERROR_ADMIN_EDIT_REJECTION] Erro ao editar embed da mensagem do ADM na rejeição: {e_admin_edit}\nTraceback: {e_admin_edit.__traceback__}")
+        # Se foi timeout, on_timeout da View já tratou a mensagem do admin.
+
+# --- COMANDOS ---
+@bot.command(name="cmds")
+async def cmds(ctx):
+    embed = discord.Embed(title="📜 Comandos do Bot", color=discord.Color.blue())
+    embed.add_field(name="!adv [usuário] [motivo]", value="Adverte um usuário.", inline=False)
+    embed.add_field(name="!advs [usuário]", value="Mostra advertências de um usuário.", inline=False)
+    embed.add_field(name="!remove-adv [usuário] [índice]", value="Remove uma advertência.", inline=False)
+    embed.add_field(name="!remove-all-advs [usuário]", value="Remove todas advertências.", inline=False)
+    embed.add_field(name=f"!cmusica https://youtube.com/ (no <#{USER_MUSIC_CHANNEL_ID}>)", value="Solicita música para Drive (requer aprovação).", inline=False)
+    embed.add_field(name=f"!bmusica [busca] (no <#{USER_MUSIC_CHANNEL_ID}>)", value="Busca/Solicita música para Drive (requer aprovação).", inline=False)
+    await ctx.send(embed=embed)
+
+@bot.command(name="adv")
+@commands.check(has_permission)
+@commands.check(is_correct_channel)
+async def adv(ctx, user: discord.Member, *, reason: str):
+    cursor.execute(
+        "INSERT INTO warns (guild_id, user_id, moderator_id, reason) VALUES (?, ?, ?, ?)",
+        (ctx.guild.id, user.id, ctx.author.id, reason)
+    )
+    conn.commit()
+    add_warn_log(ctx.author.name, user.name, reason)
+    count = cursor.execute(
+        "SELECT COUNT(*) FROM warns WHERE guild_id=? AND user_id=?",
+        (ctx.guild.id, user.id)
+    ).fetchone()[0]
+    x_emojis = "❌ " * count
+    embed_dm = discord.Embed(
+        title="Você recebeu uma advertência",
+        description=f"Motivo: {reason}\n{x_emojis}",
+        color=discord.Color.red()
+    )
+    try: await user.send(embed=embed_dm)
+    except discord.Forbidden: await ctx.send(f"Não foi possível enviar DM para {user.mention}. A advertência foi registrada.")
+    
+    embed_ch = discord.Embed(
+        title="Advertência registrada",
+        description=f"Usuário: {user.mention}\nMotivo: {reason}\n{x_emojis}",
+        color=discord.Color.blue()
+    )
+    await ctx.send(embed=embed_ch)
+
+@bot.command(name="advs")
+@commands.check(has_permission)
+@commands.check(is_correct_channel)
+async def advs(ctx, user: discord.Member):
+    cursor.execute(
+        "SELECT moderator_id, reason FROM warns WHERE guild_id=? AND user_id=?",
+        (ctx.guild.id, user.id)
+    )
+    rows = cursor.fetchall()
+    if not rows:
+        return await ctx.send(f"{user.mention} não tem advertências.")
+    embed = discord.Embed(title=f"Advertências de {user.name}", color=discord.Color.blue())
+    for idx, (mod_id, reason) in enumerate(rows, start=1):
+        mod = ctx.guild.get_member(mod_id)
+        embed.add_field(
+            name=f"{idx}.",
+            value=f"Moderador: {mod.name if mod else f'ID {mod_id}'}\nMotivo: {reason}",
+            inline=False
+        )
+    await ctx.send(embed=embed)
+
+@bot.command(name="remove-adv")
+@commands.check(has_permission)
+@commands.check(is_correct_channel)
+async def remove_adv(ctx, user: discord.Member, index: int):
+    cursor.execute(
+        "SELECT id FROM warns WHERE guild_id=? AND user_id=?",
+        (ctx.guild.id, user.id)
+    )
+    warns_data = cursor.fetchall()
+    if not warns_data or index < 1 or index > len(warns_data):
+        return await ctx.send("Índice inválido ou sem advertências.")
+    warn_id = warns_data[index-1][0]
+    cursor.execute("DELETE FROM warns WHERE id=?", (warn_id,))
+    conn.commit()
+    await ctx.send(f"Advertência #{index} de {user.mention} removida.")
+
+@bot.command(name="remove-all-advs")
+@commands.check(has_permission)
+@commands.check(is_correct_channel)
+async def remove_all_advs(ctx, user: discord.Member):
+    cursor.execute("DELETE FROM warns WHERE guild_id=? AND user_id=?",
+                   (ctx.guild.id, user.id))
+    conn.commit()
+    await ctx.send(f"Todas as advertências de {user.mention} foram removidas.")
+
+
+@bot.command(name="cmusica", aliases=["Cmusica"])
+@commands.check(is_user_music_channel)
+async def cmusica(ctx, youtube_url: str):
+    if not re.match(r"https?://(www\.)?(youtube\.com/watch\?v=|youtu\.be/)", youtube_url):
+        return await ctx.send("❌ URL do YouTube inválida. Use o formato completo do link do vídeo.")
+
+    row = cursor.execute(
+        "SELECT drive_link, title FROM music_cache WHERE youtube_url=?",
+        (youtube_url,)
+    ).fetchone()
+    if row:
+        drive_link, title = row
+        return await ctx.send(f"🔁 Música **{title}** já está no Drive e aprovada:\n{drive_link}")
+
+    await process_music_with_approval(ctx, youtube_url, ctx.author)
+
+
+@bot.command(name="bmusica")
+@commands.check(is_user_music_channel)
+async def bmusica(ctx, *, search: str):
+    cursor.execute("SELECT title, drive_link FROM music_cache WHERE title LIKE ?", (f"%{search}%",))
+    rows = cursor.fetchall()
+
+    if rows:
+        embed = discord.Embed(title=f"🎶 Músicas encontradas no cache para '{search}':", color=discord.Color.green())
+        description = []
+        for i, (title_res, link) in enumerate(rows[:10]): # Renomeado title para title_res
+            description.append(f"{i+1}. **{title_res}**\n   [Link do Drive]({link})")
+        embed.description = "\n".join(description)
+        if len(rows) > 10:
+            embed.set_footer(text=f"Mostrando 10 de {len(rows)} resultados.")
+        return await ctx.send(embed=embed)
+
+    initial_response_msg = await ctx.send(f"🔍 Nenhuma música encontrada no cache para '**{search}**'.\n"
+                                           "Se desejar adicionar, envie o link completo do YouTube em até 60 segundos:")
+
+    def check_message_author(msg_response): # Renomeado
+        return msg_response.author == ctx.author and \
+               msg_response.channel == ctx.channel and \
+               re.match(r"https?://(www\.)?(youtube\.com/watch\?v=|youtu\.be/)", msg_response.content)
+
+    try:
+        user_link_message = await bot.wait_for("message", timeout=60.0, check=check_message_author)
+        youtube_url = user_link_message.content
+        
+        try:
+            await user_link_message.delete()
+            await initial_response_msg.delete()
+        except discord.HTTPException:
+            pass 
+
+        row = cursor.execute("SELECT drive_link, title FROM music_cache WHERE youtube_url=?", (youtube_url,)).fetchone()
+        if row:
+            drive_link, title_res_cache = row # Renomeado title
+            return await ctx.send(f"🔁 Música **{title_res_cache}** já está no Drive (encontrada pelo link):\n{drive_link}")
+        
+        await process_music_with_approval(ctx, youtube_url, ctx.author)
+
+    except asyncio.TimeoutError:
+        await initial_response_msg.edit(content=f"⏳ Tempo esgotado para '**{search}**'. Nenhuma URL do YouTube foi enviada.")
+    except Exception as e:
+        print(f"[ERROR_BMUSICA] Erro no comando bmusica: {e}\nTraceback: {e.__traceback__}")
+        await ctx.send(f"❌ Erro ao processar a busca/adição de música: {e}")
+
+
+# --- EVENTOS ---
+@bot.event
+async def on_ready():
+    global bot_instance
+    bot_instance = bot
+    print(f"✅ Bot {bot.user.name} está online!")
+    for cid in channels_to_notify:
+        ch = bot.get_channel(cid)
+        if ch:
+            try:
+                asyncio.create_task(ch.send("🟢 Bot iniciado e pronto para receber comandos."))
+            except Exception as e:
+                print(f"Erro ao enviar mensagem on_ready para canal {cid}: {e}")
+
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CheckFailure):
+        if ctx.command and ctx.command.name in ["cmusica", "bmusica"] and not is_user_music_channel(ctx):
+            await ctx.send(f"🚫 Este comando de música só pode ser usado no canal <#{USER_MUSIC_CHANNEL_ID}>.")
+        elif ctx.command and ctx.command.name in ["adv", "advs", "remove-adv", "remove-all-advs"] and not is_correct_channel(ctx):
+             await ctx.send(f"🚫 Este comando de advertência só pode ser usado no canal <#{1349002209794195526}>.")
+        else:
+            await ctx.send("🚫 Você não tem permissão para usar este comando aqui ou em geral.")
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send(f"🚫 Argumento faltando: `{error.param.name}`. Consulte `!cmds` para o uso correto.")
+    elif isinstance(error, commands.CommandNotFound):
+        pass # Não envia mensagem para comando não encontrado, para evitar spam.
+        # await ctx.send(f"🚫 Comando não encontrado. Digite `!cmds` para ver a lista de comandos.")
+    elif isinstance(error, commands.CommandInvokeError):
+        original = error.original
+        print(f"ERRO ORIGINAL em {ctx.command}: {type(original).__name__}: {original}")
+        print(f"Traceback do erro original: {original.__traceback__}")
+        await ctx.send(f"🚫 Ocorreu um erro ao executar o comando '{ctx.command.name}'. Verifique o console para detalhes.")
+    else:
+        print(f"Erro não tratado no comando {ctx.command}: {type(error).__name__}: {error}")
+        print(f"Traceback: {error.__traceback__}")
+        await ctx.send(f"🚫 Ocorreu um erro inesperado. O desenvolvedor foi notificado (no console).")
+
+# --- NOTIFICAÇÃO DE DESLIGAMENTO ---
+async def notify_shutdown_async():
+    if bot_instance:
+        for cid in channels_to_notify:
+            ch = bot_instance.get_channel(cid)
+            if ch:
+                try:
+                    await ch.send("🔴 Bot está sendo desligado.")
+                except Exception as e:
+                    print(f"Erro ao notificar desligamento no canal {cid}: {e}")
+
+def shutdown_handler():
+    if bot_instance and bot_instance.loop and bot_instance.loop.is_running(): # Adicionado check para loop
+        asyncio.run_coroutine_threadsafe(notify_shutdown_async(), bot_instance.loop)
+
+atexit.register(shutdown_handler)
+
+# --- INICIA BOT ---
+if TOKEN == "SEU_TOKEN_AQUI" or not TOKEN:
+    print("ERRO: Token do bot não configurado. Edite o script.")
+else:
+    try:
+        bot.run(TOKEN)
+    except discord.PrivilegedIntentsRequired:
+        print("ERRO: Privileged Intents (Server Members e/ou Message Content) não estão habilitadas para o bot no Developer Portal do Discord.")
+    except Exception as e:
+        print(f"Erro fatal ao iniciar o bot: {e}")
