@@ -20,4 +20,4 @@ Este é um bot para Discord feito em Python, projetado para facilitar algumas ta
 * O token do bot precisa ser definido em um arquivo `.env`.
 * IDs de canais, cargos e da pasta do Google Drive são configurados diretamente no código.
 
-Esta é a versão 7.0 e final deste projeto.
+Esta é a versão 8.0 e final deste projeto.
