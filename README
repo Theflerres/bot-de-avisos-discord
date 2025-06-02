@@ -1,27 +1,23 @@
+## Bot Discord Multifuncional (Python) - v8.0 (Final)
 
-=========================================================================
-Esse código é um projeto para fazer um simples bot de advertencias no Discord.
-Funçoes do bot:
--criar uma advertencia para um usuario.
+Este é um bot para Discord feito em Python, projetado para facilitar algumas tarefas no seu servidor.
 
--remover uma advertencias de um usuario.
+**O que ele faz:**
 
--ver advertencias de um usuario.
+* **Gerenciador de Músicas (YouTube para Google Drive):**
+    * Permite que usuários adicionem músicas de links do YouTube (`!cmusica`).
+    * O bot baixa o áudio, converte para MP3 e salva automaticamente em uma pasta do Google Drive.
+    * Guarda um registro das músicas para que possam ser buscadas e acessadas facilmente (`!bmusica`), evitando downloads repetidos.
+* **Sistema de Advertências:**
+    * Ajuda na moderação permitindo que administradores deem advertências a usuários (`!adv`).
+    * É possível ver as advertências de um usuário (`!advs`) e removê-las (`!remove-adv`, `!remove-all-advs`).
 
--remover todas as advertencias de um usuario.
+**Principais Tecnologias:**
+* Python com a biblioteca `discord.py`.
+* Usa `yt-dlp` para baixar vídeos e interage com a API do Google Drive para salvar os áudios.
 
--Registro de cada advertencia enviado ao log 
-no momento da advertencia.
+**Configuração Básica:**
+* O token do bot precisa ser definido em um arquivo `.env`.
+* IDs de canais, cargos e da pasta do Google Drive são configurados diretamente no código.
 
--Enviar mensagem na Dm da pessoa que tomou a Advertencia.
-
--Envio de imagem na advertência
-
-Atualização log 01/05/2025
-
--Versão 4.0 descartada sistema de Blackjack retirado do bot.
-
--Agora é possível enviar fotos nas advertências como forma de prova para tal advertência (Foto é enviada na mensagem para a pessoa que recebe a advertência ( foto não armazena no banco de dados))
-
-
-========================================================================
+Esta é a versão 7.0 e final deste projeto.
