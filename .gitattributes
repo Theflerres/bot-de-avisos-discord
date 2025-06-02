@@ -1,0 +1,48 @@
+# -----------------------------------------------------------------------------
+# .gitattributes para Projeto Python Discord Bot
+# -----------------------------------------------------------------------------
+
+# Forçar arquivos .py a serem reconhecidos e contados como Python
+# Esta é a linha mais importante para corrigir a detecção de linguagem.
+*.py linguist-language=Python
+
+# --- Arquivo README ---
+# Se o seu arquivo README principal se chama apenas "README" (sem extensão)
+# e você o escreve usando a sintaxe Markdown:
+README linguist-language=Markdown
+# Se o seu README for apenas texto simples, sem formatação Markdown, use:
+# README linguist-language=Text
+# Nota: Se o seu README já se chama "README.md", a linha acima para "README"
+# pode não ser estritamente necessária para a detecção da linguagem Markdown,
+# mas não prejudica tê-la.
+
+# --- Arquivos de Texto Comuns (.txt) ---
+# Tratar arquivos .txt (como requirements.txt, logs, notas, etc.) como texto.
+# 'linguist-documentation' pode ajudar a classificá-los como documentação,
+# o que pode fazer com que contem menos para as estatísticas principais de linguagem.
+*.txt linguist-language=Text linguist-documentation
+
+# --- Arquivos de Banco de Dados ---
+# Arquivos de banco de dados (como SQLite) não são código fonte.
+# 'linguist-vendored' os remove das estatísticas de linguagem e da contagem de linhas.
+*.db linguist-vendored
+*.sqlite linguist-vendored
+*.sqlite3 linguist-vendored
+
+# --- Arquivos JSON ---
+# Se você tiver arquivos de configuração .json comitados (ex: um template de config)
+*.json linguist-language=JSON
+
+# --- Arquivos específicos do Git ---
+# Para o próprio .gitignore e .gitattributes, caso queira ser explícito.
+.gitignore linguist-language=Text
+.gitattributes linguist-language=Text
+
+# --- Arquivos que NÃO DEVEM ESTAR NO REPOSITÓRIO (mas se estivessem) ---
+# Exemplo para .env (LEMBRE-SE: NÃO COMITE ARQUIVOS .env COM SEGREDOS!)
+# Se por algum motivo um .env SEM SEGREDOS estivesse no repo:
+# .env linguist-language=Text linguist-detectable=false linguist-vendored
+
+# -----------------------------------------------------------------------------
+# Fim do arquivo .gitattributes
+# -----------------------------------------------------------------------------
